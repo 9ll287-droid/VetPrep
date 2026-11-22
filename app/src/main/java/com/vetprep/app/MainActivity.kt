@@ -2,20 +2,29 @@ package com.vetprep.app
 
 import android.app.DatePickerDialog
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,17 +39,28 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.google.android.gms.ads.AdRequest
+import com.google.android.gms.ads.AdSize
+import com.google.android.gms.ads.AdView
+import com.google.android.gms.ads.MobileAds
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 
 val Indigo = Color(0xFF1F2A6B); val Haldi = Color(0xFFF2B01E); val Chalk = Color(0xFFF4F5FA)
 val Moss = Color(0xFF2E7D5B); val Mut = Color(0xFF5D6385); val Line = Color(0xFFDFE2EF)
-val Ink = Color(0xFF14172B); val Bad = Color(0xFFB3261E)
+val Ink = Color(0xFF14172B); val Bad = Color(0xFFB3261E); val Soft = Color(0xFFC9CEF0)
 
 data class Course(val n: String, val t: Int, val p: Int, val books: List<String> = emptyList())
+data class Doc(val course: String, val name: String, val uri: String)
 
 val Years = listOf(
     listOf(
@@ -76,52 +96,100 @@ val Tips = listOf(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Indigo, background = Chalk)) { App() } }
+        MobileAds.initialize(this) {}
+        val billing = Billing(this)
+        billing.start()
+        setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Indigo, background = Chalk)) { App(billing) } }
     }
 }
 
 fun credits(y: Int) = Years[y - 1].sumOf { it.t + it.p }
+fun openPdf(ctx: Context, d: Doc) {
+    try {
+        ctx.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(d.uri), "application/pdf").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (e: Exception) { Toast.makeText(ctx, "No PDF reader found. Install any PDF reader app.", Toast.LENGTH_LONG).show() }
+}
 
 @Composable
-fun App() {
+fun App(billing: Billing) {
     val ctx = LocalContext.current
     val sp = remember { ctx.getSharedPreferences("vp", Context.MODE_PRIVATE) }
     val prog = remember { mutableStateMapOf<String, Int>().apply { Years.flatten().forEach { put(it.n, sp.getInt(it.n, 0)) } } }
+    val docs = remember { mutableStateListOf<Doc>().apply { (sp.getString("docs", "") ?: "").split("\n").forEach { l -> val f = l.split("\t"); if (f.size == 3) add(Doc(f[0], f[1], f[2])) } } }
+    val tasks = remember { mutableStateListOf<String>().apply { (sp.getString("tasks", "") ?: "").split("\n").filter { it.length > 2 }.forEach { add(it) } } }
+    val streak = remember {
+        val today = LocalDate.now().toString(); val last = sp.getString("last", "") ?: ""; var s = sp.getInt("streak", 0)
+        if (last != today) { s = if (last == LocalDate.now().minusDays(1).toString()) s + 1 else 1; sp.edit().putString("last", today).putInt("streak", s).apply() }
+        s
+    }
     var exam by remember { mutableStateOf(sp.getString("exam", "") ?: "") }
     var tab by remember { mutableIntStateOf(0) }
-    var year by remember { mutableIntStateOf(1) }
+    var year by remember { mutableIntStateOf(sp.getInt("year", 1)) }
+    var onb by remember { mutableStateOf(sp.getBoolean("onb", false)) }
     var splash by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) { delay(1900); splash = false }
+    var target by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) { delay(1200); splash = false }
+    val setY: (Int) -> Unit = { year = it; sp.edit().putInt("year", it).apply() }
     val save: (String, Int) -> Unit = { k, v -> sp.edit().putInt(k, v).apply() }
+    val saveTasks = { sp.edit().putString("tasks", tasks.joinToString("\n")).apply() }
+    val saveDocs = { sp.edit().putString("docs", docs.joinToString("\n") { "${it.course}\t${it.name}\t${it.uri}" }).apply() }
+    val cards = remember { mutableStateListOf<Flash>().apply { (sp.getString("cards", "") ?: "").split("\n").forEach { l -> val f = l.split("\t"); if (f.size == 6) add(Flash(f[0].toLong(), f[1], f[2], f[3].toLong(), f[4].toInt(), f[5].toDouble())) } } }
+    val saveCards = { sp.edit().putString("cards", cards.joinToString("\n") { "${it.id}\t${it.front}\t${it.back}\t${it.due}\t${it.gap}\t${it.ease}" }).apply() }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) {
+            runCatching { ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            val name = ctx.contentResolver.query(uri, null, null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else null } ?: "PDF"
+            docs.add(Doc(target, name.replace("\t", " "), uri.toString())); saveDocs()
+        }
+    }
     val pick = {
         val d = LocalDate.now()
         DatePickerDialog(ctx, { _, y, m, day -> exam = LocalDate.of(y, m + 1, day).toString(); sp.edit().putString("exam", exam).apply() }, d.year, d.monthValue - 1, d.dayOfMonth).show()
     }
-    val names = listOf("Home", "Courses", "Exams", "Tools")
-    val icons = listOf(Icons.Filled.Home, Icons.Filled.Menu, Icons.Filled.Info, Icons.Filled.Settings)
+    var sub by remember { mutableIntStateOf(0) }
+    val dueCards = cards.count { it.due <= LocalDate.now().toEpochDay() }
+    val names = listOf("Home", "Books", "Cards", "Info")
+    val icons = listOf(Icons.Filled.Home, Icons.Filled.Favorite, Icons.Filled.Create, Icons.Filled.Info)
+    val heads = listOf("Vet Prep" to "", "Books" to "Your PDFs, one tap away.", "Cards" to "Revise at the right time.", "Info" to "Syllabus, exams and tools.")
     Box {
-        Scaffold(containerColor = Chalk, bottomBar = {
-            NavigationBar(containerColor = Color.White) {
-                names.forEachIndexed { i, n ->
-                    NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(icons[i], null) }, label = { Text(n) },
-                        colors = NavigationBarItemDefaults.colors(selectedIconColor = Indigo, selectedTextColor = Indigo, indicatorColor = Haldi.copy(alpha = 0.4f), unselectedIconColor = Mut, unselectedTextColor = Mut))
+        if (!onb) Onboarding { y -> setY(y); sp.edit().putBoolean("onb", true).apply(); onb = true }
+        else Scaffold(containerColor = Chalk, bottomBar = {
+            Column {
+                NavigationBar(containerColor = Color.White) {
+                    names.forEachIndexed { i, n ->
+                        NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(icons[i], null) }, label = { Text(n, fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(selectedIconColor = Indigo, selectedTextColor = Indigo, indicatorColor = Haldi.copy(alpha = 0.4f), unselectedIconColor = Mut, unselectedTextColor = Mut))
+                    }
                 }
+                Banner()
             }
         }) { pad ->
             Box(Modifier.padding(pad)) {
-                AnimatedContent(tab, transitionSpec = { (fadeIn(tween(280)) + slideInHorizontally { it / 12 }) togetherWith fadeOut(tween(120)) }, label = "tab") { t ->
-                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp)) {
-                        when (t) {
-                            0 -> Home(year, { year = it }, prog, exam, pick) { year = it; tab = 1 }
-                            1 -> Courses(year, { year = it }, prog, save)
-                            2 -> Exams()
-                            else -> Tools(year) { year = it }
+                AnimatedContent(tab, transitionSpec = { (fadeIn(tween(250)) + slideInHorizontally { it / 12 }) togetherWith fadeOut(tween(100)) }, label = "tab") { t ->
+                    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+                        Title(heads[t].first, heads[t].second)
+                        if (t == 3) Segmented(listOf("Courses", "Exams", "Tools"), sub) { sub = it }
+                        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                            when (t) {
+                                0 -> Home(year, prog, exam, pick, streak, tasks, saveTasks, dueCards) { tab = 2 }
+                                1 -> Library(year, setY, docs, { target = it; picker.launch(arrayOf("application/pdf")) }, { d, n -> val i = docs.indexOf(d); if (i >= 0) { docs[i] = d.copy(name = n.replace("	", " ")); saveDocs() } }) { docs.remove(it); saveDocs() }
+                                2 -> Cards(cards, saveCards, billing)
+                                else -> when (sub) { 0 -> Courses(year, setY, prog, save); 1 -> Exams(); else -> Tools(year, setY) }
+                            }
+                            Spacer(Modifier.height(16.dp))
                         }
                     }
                 }
             }
         }
-        AnimatedVisibility(splash, exit = fadeOut(tween(600))) { Splash() }
+        AnimatedVisibility(splash, exit = fadeOut(tween(350))) { Splash() }
+    }
+}
+
+@Composable
+fun Banner() {
+    Box(Modifier.fillMaxWidth().background(Color.White), Alignment.Center) {
+        AndroidView(factory = { c -> AdView(c).apply { setAdSize(AdSize.BANNER); adUnitId = "ca-app-pub-3940256099942544/9214589741"; loadAd(AdRequest.Builder().build()) } }, modifier = Modifier.height(50.dp))
     }
 }
 
@@ -129,191 +197,104 @@ fun App() {
 fun Splash() {
     var go by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { go = true }
-    val w by animateDpAsState(if (go) 150.dp else 0.dp, tween(1000, 500), label = "w")
-    val a by animateFloatAsState(if (go) 1f else 0f, tween(900), label = "a")
+    val w by animateDpAsState(if (go) 150.dp else 0.dp, tween(500, 150), label = "w")
+    val a by animateFloatAsState(if (go) 1f else 0f, tween(500), label = "a")
     Box(Modifier.fillMaxSize().background(Indigo), Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Vet Prep", color = Color.White, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 52.sp, modifier = Modifier.padding(top = ((1f - a) * 24).dp))
             Box(Modifier.padding(vertical = 10.dp).width(w).height(5.dp).clip(RoundedCornerShape(5.dp)).background(Haldi))
-            Text("Know your syllabus. Study smarter.", color = Color(0xFFC9CEF0), modifier = Modifier.padding(top = 6.dp))
+            Text("Plan. Revise. Pass.", color = Soft, fontSize = 16.sp)
         }
     }
 }
 
-@Composable fun Title(t: String, s: String) {
-    Text(t, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 34.sp, color = Indigo)
-    Text(s, color = Mut, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+@Composable
+fun Onboarding(done: (Int) -> Unit) {
+    val pager = rememberPagerState { 4 }
+    val scope = rememberCoroutineScope()
+    val titles = listOf("Your whole degree, in one place", "Study in focused sessions", "Keep every book with you", "Which year are you in?")
+    val bodies = listOf("All four years, every course and credit, organised the way MAFSU teaches them.", "Set your exam date, run a 25-minute timer and tick off today’s tasks.", "Add the PDFs you download and open them from one shelf.", "We will open the right courses for you.")
+    Column(Modifier.fillMaxSize().background(Indigo).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        HorizontalPager(pager, Modifier.weight(1f)) { p ->
+            Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) {
+                Box(Modifier.height(130.dp), Alignment.Center) {
+                    when (p) {
+                        0 -> Ring(72)
+                        1 -> Text("25:00", color = Color.White, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 46.sp)
+                        2 -> Text("PDF", color = Haldi, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 52.sp)
+                        else -> Text("1 2 3 4", color = Haldi, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 40.sp)
+                    }
+                }
+                Text(titles[p], color = Color.White, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 28.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 20.dp))
+                Text(bodies[p], color = Soft, fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 10.dp))
+                if (p == 3) (1..4).forEach { n ->
+                    Button({ done(n) }, Modifier.fillMaxWidth().padding(top = 8.dp), colors = ButtonDefaults.buttonColors(containerColor = Haldi, contentColor = Color(0xFF3B2B00))) { Text("Year $n") }
+                }
+            }
+        }
+        Row(Modifier.padding(vertical = 12.dp)) {
+            repeat(4) { i ->
+                val c by animateColorAsState(if (pager.currentPage == i) Haldi else Color(0x55FFFFFF), label = "dot")
+                Box(Modifier.padding(4.dp).size(10.dp).clip(CircleShape).background(c))
+            }
+        }
+        if (pager.currentPage < 3) Button({ scope.launch { pager.animateScrollToPage(pager.currentPage + 1) } }, colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Indigo)) { Text("Next") } else Spacer(Modifier.height(40.dp))
+    }
+}
+
+@Composable
+fun Title(t: String, s: String) {
+    Column(Modifier.fillMaxWidth().background(Chalk).padding(top = 16.dp, bottom = 8.dp)) {
+        Text(t, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 34.sp, color = Indigo)
+        if (s.isNotEmpty()) Text(s, color = Mut, fontSize = 14.sp)
+    }
 }
 @Composable fun H(t: String) = Text(t, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 20.sp, color = Indigo, modifier = Modifier.padding(top = 18.dp, bottom = 6.dp))
 @Composable fun Panel(content: @Composable ColumnScope.() -> Unit) =
     Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), RoundedCornerShape(20.dp), CardDefaults.cardColors(containerColor = Color.White), border = BorderStroke(1.dp, Line)) { Column(Modifier.padding(16.dp), content = content) }
+@Composable fun HaldiButton(t: String, on: () -> Unit) = Button(on, colors = ButtonDefaults.buttonColors(containerColor = Haldi, contentColor = Color(0xFF3B2B00))) { Text(t) }
 
 @Composable
-fun Chips(y: Int, on: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), Arrangement.spacedBy(8.dp)) {
-        (1..4).forEach { n ->
-            val sel = n == y
-            val bg by animateColorAsState(if (sel) Indigo else Color.White, label = "chip")
-            Box(Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(bg).border(1.dp, Line, RoundedCornerShape(14.dp)).clickable { on(n) }.padding(vertical = 10.dp), Alignment.Center) {
-                Text("Year $n", color = if (sel) Color.White else Mut, fontWeight = FontWeight.SemiBold)
+fun YearPicker(y: Int, on: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val rot by animateFloatAsState(if (open) 180f else 0f, label = "yr")
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp).clip(RoundedCornerShape(16.dp)).background(Color.White).border(1.dp, Line, RoundedCornerShape(16.dp)).animateContentSize()) {
+        Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Year $y", Modifier.weight(1f), color = Indigo, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Text("${credits(y)} credits", color = Mut, fontSize = 13.sp, modifier = Modifier.padding(end = 6.dp))
+            Icon(Icons.Filled.KeyboardArrowDown, null, Modifier.rotate(rot), tint = Mut)
+        }
+        if (open) (1..4).forEach { n ->
+            Row(Modifier.fillMaxWidth().background(if (n == y) Haldi.copy(alpha = 0.25f) else Color.Transparent).clickable { on(n); open = false }.padding(14.dp)) {
+                Text("Year $n", Modifier.weight(1f), color = Ink)
+                Text("${Years[n - 1].size} courses", color = Mut, fontSize = 13.sp)
             }
         }
     }
 }
 
 @Composable
-fun Ring(p: Int) {
+fun Ring(p: Int, fg: Color = Color.White, track: Color = Color(0x30FFFFFF)) {
     var go by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { go = true }
-    val a by animateFloatAsState(if (go) p / 100f else 0f, tween(1400, easing = FastOutSlowInEasing), label = "ring")
-    Box(Modifier.size(116.dp), Alignment.Center) {
+    val a by animateFloatAsState(if (go) p / 100f else 0f, tween(1200, easing = FastOutSlowInEasing), label = "ring")
+    Box(Modifier.size(104.dp), Alignment.Center) {
         Canvas(Modifier.fillMaxSize().padding(8.dp)) {
-            drawArc(Color(0x30FFFFFF), -90f, 360f, false, style = Stroke(26f, cap = StrokeCap.Round))
-            drawArc(Haldi, -90f, 360f * a, false, style = Stroke(26f, cap = StrokeCap.Round))
+            drawArc(track, -90f, 360f, false, style = Stroke(24f, cap = StrokeCap.Round))
+            drawArc(Haldi, -90f, 360f * a, false, style = Stroke(24f, cap = StrokeCap.Round))
         }
-        Text("$p%", color = Color.White, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 26.sp)
+        Text("$p%", color = fg, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 24.sp)
     }
 }
 
 @Composable
-fun Home(y: Int, setY: (Int) -> Unit, prog: Map<String, Int>, exam: String, pick: () -> Unit, open: (Int) -> Unit) {
-    val c = Years[y - 1]
-    val avg = c.sumOf { prog[it.n] ?: 0 } / c.size
-    val left = runCatching { ChronoUnit.DAYS.between(LocalDate.now(), LocalDate.parse(exam)) }.getOrNull()
-    Title("Vet Prep", "Your BVSc & AH guide for all four professional years.")
-    Chips(y, setY)
-    Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), RoundedCornerShape(28.dp), CardDefaults.cardColors(containerColor = Indigo)) {
-        Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Ring(avg)
-            Column(Modifier.padding(start = 18.dp)) {
-                Text("Year $y", color = Color.White, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                Text("${c.size} courses, ${credits(y)} credits. Move the sliders in Courses to track what you have revised.", color = Color(0xFFC9CEF0), fontSize = 14.sp)
-            }
-        }
-    }
-    Panel {
-        Text("Your next exam date", color = Mut, fontSize = 13.sp)
-        Button(pick, colors = ButtonDefaults.buttonColors(containerColor = Haldi, contentColor = Color(0xFF3B2B00))) { Text(if (exam.isEmpty()) "Pick a date" else exam) }
-        if (left != null) Text(if (left > 0) "$left days left. Plan your revision backwards from here." else if (left == 0L) "Exam day. You are ready." else "That date has passed. Pick the next one.", fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.padding(top = 8.dp))
-    }
-    H("The full programme")
-    Panel {
-        (1..4).forEach { n ->
-            Row(Modifier.fillMaxWidth().clickable { open(n) }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Year $n", fontWeight = FontWeight.Bold, color = Ink)
-                    Text("${Years[n - 1].size} courses" + if (n == 4) ", runs for 1.5 years" else "", color = Mut, fontSize = 13.sp)
-                }
-                Text("${credits(n)} credits", color = Color(0xFF7A5600), fontWeight = FontWeight.SemiBold)
-            }
-        }
-        Text("Total 81 credits, then a 1-year internship.", color = Mut, fontSize = 13.sp)
-    }
-}
-
-@Composable
-fun Courses(y: Int, setY: (Int) -> Unit, prog: SnapshotStateMap<String, Int>, save: (String, Int) -> Unit) {
-    Title("Courses", "Tap a course for credits, books and your revision progress.")
-    Chips(y, setY)
-    Years[y - 1].forEach { CourseCard(it, prog, save) }
-    H("How to study this year")
-    Panel { Text(Tips[y - 1], color = Ink) }
-    H("How to add your own book")
-    Panel {
-        listOf("Tap Copy next to the book name.", "Get the book from your college library, a bookstore, or the publisher’s e-book site.", "Keep your PDF in the Downloads folder on your phone.", "Open it in your PDF reader, such as Xodo.").forEachIndexed { i, s ->
-            Text("${i + 1}. $s", color = Ink, modifier = Modifier.padding(vertical = 3.dp))
-        }
-        Text("Book names are commonly used titles. Follow the list your teachers give you.", color = Mut, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
-    }
-}
-
-@Composable
-fun CourseCard(c: Course, prog: SnapshotStateMap<String, Int>, save: (String, Int) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    var v by remember { mutableFloatStateOf((prog[c.n] ?: 0).toFloat()) }
+fun Home(y: Int, prog: Map<String, Int>, exam: String, pick: () -> Unit, streak: Int, tasks: SnapshotStateList<String>, saveTasks: () -> Unit, due: Int, goCards: () -> Unit) {
     val ctx = LocalContext.current
-    val cb = LocalClipboardManager.current
-    val rot by animateFloatAsState(if (open) 90f else 0f, label = "chev")
-    Panel {
-        Row(Modifier.fillMaxWidth().clickable { open = !open }, verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(c.n, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Ink)
-                Text("${c.t} theory + ${c.p} practical credits", color = Mut, fontSize = 13.sp)
-            }
-            Text("›", color = Mut, fontSize = 24.sp, modifier = Modifier.rotate(rot))
-        }
-        AnimatedVisibility(open) {
-            Column(Modifier.padding(top = 12.dp)) {
-                Text("Revised so far: ${v.toInt()}%", color = Mut, fontSize = 13.sp)
-                Slider(v, { v = it; prog[c.n] = it.toInt() }, valueRange = 0f..100f, onValueChangeFinished = { save(c.n, v.toInt()) }, colors = SliderDefaults.colors(thumbColor = Moss, activeTrackColor = Moss))
-                Text("Books", color = Mut, fontSize = 13.sp)
-                if (c.books.isEmpty()) Text("Book list not confirmed yet. Ask your department which book to follow.", color = Mut, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
-                c.books.forEach { b ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(b, Modifier.weight(1f).padding(end = 8.dp), fontSize = 14.sp, color = Ink)
-                        Button({ cb.setText(AnnotatedString(b)); Toast.makeText(ctx, "Book name copied", Toast.LENGTH_SHORT).show() }, colors = ButtonDefaults.buttonColors(containerColor = Haldi, contentColor = Color(0xFF3B2B00))) { Text("Copy") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable fun Bullets(title: String, items: List<String>) = Panel {
-    Text(title, fontWeight = FontWeight.Bold, color = Ink)
-    items.forEachIndexed { i, s -> Text("${i + 1}. $s", color = Ink, modifier = Modifier.padding(top = 6.dp)) }
-}
-
-@Composable
-fun Exams() {
-    Title("Exams", "How marks work under the MAFSU 2016 regulations.")
-    Bullets("Each course", listOf("3 internal tests of 40 marks. The best two count.", "Annual theory exam: 2 papers of 100 marks, 3 hours each.", "Questions are 40% objective and 60% subjective.", "Annual practical: 2 papers of 60 marks each.", "Weightage: theory 60, practical 40."))
-    Bullets("To pass", listOf("50% in theory and 50% in practical, separately.", "75% attendance in theory and in practical, separately.", "Up to 2 failed subjects can go to a compartment exam.", "Grade point is marks divided by 10. Overall grade point must be at least 5.0. A grade of 8.0 or more is Distinction."))
-    Text("Always confirm with your college notice board, because rules can be updated.", color = Mut, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
-}
-
-@Composable
-fun Field(v: String, l: String, m: Modifier = Modifier, on: (String) -> Unit) =
-    OutlinedTextField(v, on, m, label = { Text(l) }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-
-fun att(a: String, h: String): Pair<String, Boolean>? {
-    val x = a.toDoubleOrNull() ?: return null
-    val hd = h.toDoubleOrNull() ?: return null
-    if (hd <= 0) return null
-    val p = x / hd * 100
-    val n = maxOf(0, Math.ceil((0.75 * hd - x) / 0.25).toInt())
-    return if (p >= 75) Pair("%.1f%%. Safe.".format(p), true) else Pair("%.1f%%. Attend the next $n classes without a miss.".format(p), false)
-}
-
-@Composable
-fun Tools(y: Int, setY: (Int) -> Unit) {
-    var ta by remember { mutableStateOf("") }; var th by remember { mutableStateOf("") }
-    var pa by remember { mutableStateOf("") }; var ph by remember { mutableStateOf("") }
-    val marks = remember { mutableStateMapOf<String, String>() }
-    Title("Tools", "Check where you stand before it is too late.")
-    Panel {
-        Text("Attendance (75% needed)", fontWeight = FontWeight.Bold, color = Ink)
-        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Field(ta, "Theory attended", Modifier.weight(1f)) { ta = it }; Field(th, "Theory held", Modifier.weight(1f)) { th = it }
-        }
-        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Field(pa, "Practical attended", Modifier.weight(1f)) { pa = it }; Field(ph, "Practical held", Modifier.weight(1f)) { ph = it }
-        }
-        att(ta, th)?.let { Text("Theory: ${it.first}", color = if (it.second) Moss else Bad, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp)) }
-        att(pa, ph)?.let { Text("Practical: ${it.first}", color = if (it.second) Moss else Bad, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp)) }
-    }
-    Panel {
-        Text("Overall grade point for Year $y", fontWeight = FontWeight.Bold, color = Ink)
-        Chips(y, setY)
-        Text("Enter your percentage for each course.", color = Mut, fontSize = 13.sp)
-        var s = 0.0; var cr = 0
-        Years[y - 1].forEach { c ->
-            Field(marks[c.n] ?: "", "${c.n} (${c.t + c.p} credits)", Modifier.fillMaxWidth().padding(top = 8.dp)) { marks[c.n] = it }
-            marks[c.n]?.toDoubleOrNull()?.let { s += it / 10 * (c.t + c.p); cr += c.t + c.p }
-        }
-        if (cr > 0) {
-            val g = s / cr
-            Text("Grade point: %.2f  %s".format(g, if (g >= 8) "Distinction" else if (g >= 5) "Pass" else "Below 5.0"), fontWeight = FontWeight.Bold, color = if (g >= 5) Moss else Bad, modifier = Modifier.padding(top = 10.dp))
-        }
-    }
-}
+    var now by remember { mutableStateOf(LocalDateTime.now()) }
+    LaunchedEffect(Unit) { while (true) { now = LocalDateTime.now(); delay(10000) } }
+    val next = Years[y - 1].minByOrNull { prog[it.n] ?: 0 }
+    val left = runCatching { ChronoUnit.DAYS.between(LocalDate.now(), LocalDate.parse(exam)) }.getOrNull()
+    var secs by remember { mutableIntStateOf(25 * 60) }
+    var run by remember { mutableStateOf(false) }
+    var t by remember { mutableStateOf("") }
+    L
