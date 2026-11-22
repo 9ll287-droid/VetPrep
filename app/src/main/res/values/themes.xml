@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Vet Prep</string>
+    <color name="ic_launcher_background">#1F2A6B</color>
     <style name="Theme.VetPrep" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
         <item name="android:statusBarColor">#FFF4F5FA</item>
         <item name="android:navigationBarColor">#FFFFFFFF</item>
         <item name="android:windowLightStatusBar">true</item>
