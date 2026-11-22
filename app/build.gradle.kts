@@ -28,4 +28,6 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
+    implementation("com.google.android.gms:play-services-ads:23.3.0")
+    implementation("com.android.billingclient:billing-ktx:7.1.1")
 }
