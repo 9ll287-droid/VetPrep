@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vet Prep</string>
+    <style name="Theme.VetPrep" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FFF4F5FA</item>
+        <item name="android:navigationBarColor">#FFFFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
